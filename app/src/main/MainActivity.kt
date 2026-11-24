@@ -547,7 +547,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         try {
-            RecorderService.start(this, stream, recordingQuality)
+            RecorderService.start(this, stream)
             isRecording = true
             recordButton.text = "STOP RECORDING"
             status.text = "Recording HLS stream..."
