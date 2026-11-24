@@ -4,6 +4,13 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.net.TrafficStats
+import android.os.Process
+import android.media.projection.MediaProjectionManager
+import android.content.pm.PackageManager
+import android.Manifest
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -13,6 +20,7 @@ import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
@@ -24,18 +32,54 @@ class MainActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private lateinit var urlInput: EditText
     private lateinit var status: TextView
+    private lateinit var usageMeter: TextView
+    private val usageHandler = Handler(Looper.getMainLooper())
+    private var lastRxBytes = -1L
+    private var usageMonitorStarted = false
+    private val usageTick = object : Runnable {
+        override fun run() {
+            updateNetworkUsage()
+            if (usageMonitorStarted) usageHandler.postDelayed(this, 60_000L)
+        }
+    }
     private lateinit var webView: WebView
     private lateinit var playlistBox: LinearLayout
     private lateinit var content: LinearLayout
     private lateinit var recordButton: Button
     private lateinit var bookmarkButton: Button
+    private lateinit var catalogPanel: CountryCatalogPanel
+    private var recordingQuality = "Auto"
     private var activeMode = "direct"
     private var currentStreamUrl: String? = null
     private var isRecording = false
+    private var isScreenRecording = false
+    private val screenCaptureLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            val serviceIntent = Intent(this, ScreenRecorderService::class.java)
+                .putExtra(ScreenRecorderService.EXTRA_RESULT_CODE, result.resultCode)
+                .putExtra(ScreenRecorderService.EXTRA_RESULT_DATA, result.data)
+                .putExtra(ScreenRecorderService.EXTRA_QUALITY, recordingQuality)
+                .putExtra(ScreenRecorderService.EXTRA_AUDIO, checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+            if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(serviceIntent) else startService(serviceIntent)
+            isRecording = true
+            isScreenRecording = true
+            recordButton.text = "STOP RECORDING"
+            status.text = "Screen recording started. Audio uses microphone when permitted."
+        } else {
+            toast("Screen recording permission was not granted")
+        }
+    }
     private val ntvLiveUrl = "https://news.ntv.co.jp/live"
 
+    private var pendingBackupText = ""
     private val openPlaylist = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) loadPlaylist(uri)
+    }
+    private val createBackup = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null) runCatching {
+            contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(pendingBackupText) }
+            toast("Tv Ch TXT backup saved")
+        }.onFailure { toast("Backup error: ${it.message}") }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,8 +100,8 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 4, 0, 12)
         }
         val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        listOf("LIVE", "WEB TV", "CHANNELS").forEachIndexed { index, label ->
-            val mode = listOf("direct", "web", "list")[index]
+        listOf("LIVE", "RADIO", "WEB TV", "CHANNELS").forEachIndexed { index, label ->
+            val mode = listOf("direct", "radio", "web", "list")[index]
             modes.addView(Button(this).apply {
                 text = label
                 isAllCaps = false
@@ -101,6 +145,11 @@ class MainActivity : AppCompatActivity() {
             isAllCaps = false
             setOnClickListener { addBookmark() }
         }, LinearLayout.LayoutParams(0, -2, 1f))
+        extraActions.addView(Button(this).apply {
+            text = "QUALITY: AUTO"
+            isAllCaps = false
+            setOnClickListener { chooseRecordingQuality(this) }
+        }, LinearLayout.LayoutParams(0, -2, 1f))
         val ntvActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         ntvActions.addView(Button(this).apply {
             text = "NTV LIVE"
@@ -117,6 +166,35 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
         }
+        catalogPanel = CountryCatalogPanel(this, { results, _ ->
+            playlistBox.removeAllViews()
+            val saved = getSharedPreferences("tvch_catalog", MODE_PRIVATE).getStringSet("entries", emptySet())?.toMutableSet() ?: mutableSetOf()
+            results.forEach { channel ->
+                if (channel.url.isNotBlank()) {
+                    saved.add(listOf(channel.name, channel.url, channel.country, channel.type).joinToString("\t"))
+                    playlistBox.addView(Button(this).apply {
+                        text = "${channel.name}  •  ${channel.country}  •  ${channel.type}"
+                        isAllCaps = false
+                        setOnClickListener {
+                            urlInput.setText(channel.url)
+                            if (channel.url.contains(".m3u8", true) || channel.url.contains(".mpd", true) || channel.url.startsWith("rtsp")) {
+                                showMode("direct"); playStream(channel.url)
+                            } else { showMode("web"); webView.loadUrl(channel.url) }
+                        }
+                    }, LinearLayout.LayoutParams(-1, -2))
+                }
+            }
+            getSharedPreferences("tvch_catalog", MODE_PRIVATE).edit().putStringSet("entries", saved).apply()
+            showMode("list")
+            status.text = "${results.size} catalog results loaded"
+        }, { exportTextData() })
+        usageMeter = TextView(this).apply {
+            text = "مصرف اینترنت در هر دقیقه: در انتظار پخش"
+            textSize = 11f
+            setTextColor(0xFFB9D6E2.toInt())
+            setPadding(8, 5, 8, 5)
+            setBackgroundColor(0xFF1B2A33.toInt())
+        }
         status = TextView(this).apply {
             text = "آماده دریافت شبکه"
             textSize = 14f
@@ -129,7 +207,9 @@ class MainActivity : AppCompatActivity() {
         page.addView(actions)
         page.addView(extraActions)
         page.addView(ntvActions)
+        page.addView(catalogPanel, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         page.addView(content)
+        page.addView(usageMeter)
         page.addView(status)
         setContentView(page)
         showMode("direct")
@@ -166,8 +246,25 @@ class MainActivity : AppCompatActivity() {
         content.removeAllViews()
         when (mode) {
             "direct" -> {
+                player?.let { exo ->
+                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false).build()
+                }
                 content.addView(playerView, LinearLayout.LayoutParams(-1, -1))
                 status.text = "Direct player: HLS, DASH, RTSP and compatible streams"
+            }
+            "radio" -> {
+                applyRadioSavingProfile()
+                val radioInfo = TextView(this).apply {
+                    text = "RADIO • حالت کم‌مصرف\nفقط صدا | بدون دریافت تصویر\nبرای کاهش بیشتر مصرف اینترنت، آدرس جریان صوتی کم‌نرخ (ترجیحاً 32 تا 64 kbps) را وارد کنید."
+                    textSize = 17f
+                    gravity = android.view.Gravity.CENTER
+                    setTextColor(0xFFFFFFFF.toInt())
+                    setPadding(18, 24, 18, 24)
+                }
+                content.addView(radioInfo, LinearLayout.LayoutParams(-1, 0, 1f))
+                content.addView(playerView, LinearLayout.LayoutParams(-1, 0, 1f))
+                status.text = "Radio economy mode: audio only, video tracks disabled, audio capped at 48 kbps when available."
             }
             "web" -> {
                 content.addView(webView, LinearLayout.LayoutParams(-1, -1))
@@ -230,6 +327,12 @@ class MainActivity : AppCompatActivity() {
                     })
                 }
             }
+            if (activeMode == "radio") applyRadioSavingProfile() else {
+                player?.let { exo ->
+                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, false).build()
+                }
+            }
             val item = MediaItem.Builder().setUri(url).apply {
                 val lower = url.substringBefore('?').lowercase()
                 when {
@@ -241,10 +344,53 @@ class MainActivity : AppCompatActivity() {
             player?.setMediaItem(item)
             player?.prepare()
             player?.play()
+            startNetworkUsageMonitor()
             status.text = "Connecting to stream..."
         } catch (e: Exception) {
             status.text = "Error: ${e.message ?: "Unknown"}"
         }
+    }
+
+    // Android UID traffic counters report bytes received by this app (player + WebView + catalog traffic).
+    // The displayed figure is the measured delta for each 60-second interval, not an estimated bitrate.
+    private fun startNetworkUsageMonitor() {
+        usageMonitorStarted = true
+        lastRxBytes = readUidRxBytes()
+        usageHandler.removeCallbacks(usageTick)
+        usageMeter.text = "مصرف اینترنت در هر دقیقه: در حال اندازه‌گیری…"
+        usageHandler.postDelayed(usageTick, 60_000L)
+    }
+
+    private fun readUidRxBytes(): Long = TrafficStats.getUidRxBytes(Process.myUid())
+
+    private fun updateNetworkUsage() {
+        val current = readUidRxBytes()
+        if (current == TrafficStats.UNSUPPORTED.toLong() || lastRxBytes < 0L) {
+            usageMeter.text = "مصرف اینترنت در هر دقیقه: در این دستگاه قابل اندازه‌گیری نیست"
+            lastRxBytes = current
+            return
+        }
+        val delta = (current - lastRxBytes).coerceAtLeast(0L)
+        lastRxBytes = current
+        val kb = delta / 1024.0
+        val mb = delta / (1024.0 * 1024.0)
+        val amount = if (mb >= 1.0) String.format(java.util.Locale.US, "%.2f MB  (%.0f KB)", mb, kb)
+                     else String.format(java.util.Locale.US, "%.1f KB  (%.3f MB)", kb, mb)
+        usageMeter.text = "مصرف واقعی ۱ دقیقه اخیر: $amount"
+    }
+
+    private fun stopNetworkUsageMonitor() {
+        usageMonitorStarted = false
+        usageHandler.removeCallbacks(usageTick)
+    }
+
+    private fun applyRadioSavingProfile() {
+        val exo = player ?: return
+        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+            .setMaxAudioBitrate(48_000)
+            .setMaxAudioChannelCount(1)
+            .build()
     }
 
     private fun loadPlaylist(uri: Uri) {
@@ -269,6 +415,9 @@ class MainActivity : AppCompatActivity() {
                 ) {
                     val streamUrl = line
                     val channelName = pendingChannelName
+                    val saved = getSharedPreferences("tvch_catalog", MODE_PRIVATE).getStringSet("entries", emptySet())?.toMutableSet() ?: mutableSetOf()
+                    saved.add(listOf(channelName, streamUrl, "Unknown", "TV").joinToString("\t"))
+                    getSharedPreferences("tvch_catalog", MODE_PRIVATE).edit().putStringSet("entries", saved).apply()
                     val channelButton = Button(this).apply {
                         this.text = channelName
                         isAllCaps = false
@@ -351,25 +500,54 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun chooseRecordingQuality(button: Button) {
+        val qualities = arrayOf("Auto", "240p", "360p", "480p", "576p", "720p", "1080p")
+        AlertDialog.Builder(this).setTitle("Recording quality")
+            .setSingleChoiceItems(qualities, qualities.indexOf(recordingQuality).coerceAtLeast(0)) { dialog, which ->
+                recordingQuality = qualities[which]
+                button.text = "QUALITY: ${recordingQuality.uppercase()}"
+                dialog.dismiss()
+            }.setNegativeButton("CLOSE", null).show()
+    }
+
+    private fun exportTextData() {
+        val bookmarks = getSharedPreferences("tv_r_bookmarks", MODE_PRIVATE).getStringSet("items", emptySet()).orEmpty()
+        val catalog = getSharedPreferences("tvch_catalog", MODE_PRIVATE).getStringSet("entries", emptySet()).orEmpty()
+        val body = buildString {
+            appendLine("# Tv Ch text backup")
+            appendLine("# BOOKMARKS")
+            bookmarks.sorted().forEach { appendLine(it) }
+            appendLine("# CATALOG: name<TAB>url<TAB>country<TAB>type")
+            catalog.sorted().forEach { appendLine(it) }
+        }
+        pendingBackupText = body
+        createBackup.launch("Tv Ch backup.txt")
+    }
+
     private fun toggleRecording() {
         if (isRecording) {
-            RecorderService.stop(this)
+            if (isScreenRecording) ScreenRecorderService.stop(this) else RecorderService.stop(this)
             isRecording = false
+            isScreenRecording = false
             recordButton.text = "RECORD"
-            status.text = "Recording stopped."
+            status.text = "Recording stopped. Check the Recordings folder."
+            return
+        }
+        if (activeMode == "web") {
+            startWebsiteScreenRecording()
             return
         }
         if (activeMode != "direct") {
-            toast("Switch to LIVE mode and play a direct HLS stream before recording")
+            toast("برای ضبط سایت، WEB TV و برای ضبط مستقیم، LIVE را انتخاب کنید")
             return
         }
         val stream = currentStreamUrl ?: urlInput.text.toString().trim()
         if (!stream.substringBefore('?').lowercase().endsWith(".m3u8")) {
-            toast("Recording currently supports clear HLS (.m3u8) streams only")
+            toast("ضبط مستقیم فقط برای جریان‌های HLS با پسوند m3u8 فعال است؛ برای سایت از WEB TV استفاده کنید")
             return
         }
         try {
-            RecorderService.start(this, stream)
+            RecorderService.start(this, stream, recordingQuality)
             isRecording = true
             recordButton.text = "STOP RECORDING"
             status.text = "Recording HLS stream..."
@@ -378,14 +556,41 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun startWebsiteScreenRecording() {
+        val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val request = {
+            screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            AlertDialog.Builder(this)
+                .setTitle("ضبط سایت")
+                .setMessage("برای تلاش جهت ضبط صدا، اجازه میکروفون لازم است. اگر اجازه ندهید، تصویر بدون صدا ضبط می‌شود. صدای داخلی سایت در همه گوشی‌ها قابل دریافت نیست.")
+                .setPositiveButton("اجازه می‌دهم") { _, _ ->
+                    requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 702)
+                }
+                .setNegativeButton("فقط تصویر") { _, _ -> request() }
+                .show()
+        } else request()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 702) {
+            val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+        }
+    }
+
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
 
     override fun onStop() {
         super.onStop()
+        stopNetworkUsageMonitor()
         player?.pause()
     }
 
     override fun onDestroy() {
+        stopNetworkUsageMonitor()
         playerView.player = null
         player?.release()
         player = null
