@@ -25,14 +25,18 @@ class ScreenRecorderService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        val startIntent = intent ?: run {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        if (startIntent.action == ACTION_STOP) {
             stopCapture()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
         createNotificationChannel()
-        val withMic = intent?.getBooleanExtra(EXTRA_AUDIO, false) == true
+        val withMic = startIntent.getBooleanExtra(EXTRA_AUDIO, false) == true
         val notification = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.presence_video_online)
             .setContentTitle("Tv Ch • ضبط صفحه")
@@ -46,13 +50,13 @@ class ScreenRecorderService : Service() {
         } else startForeground(NOTIFICATION_ID, notification)
 
         try {
-            val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
+            val resultCode = startIntent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
             @Suppress("DEPRECATION")
-            val data = if (Build.VERSION.SDK_INT >= 33) intent?.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java) else intent?.getParcelableExtra(EXTRA_RESULT_DATA)
+            val data = if (Build.VERSION.SDK_INT >= 33) startIntent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java) else startIntent.getParcelableExtra(EXTRA_RESULT_DATA)
             if (resultCode != Activity.RESULT_OK || data == null) throw IllegalStateException("اجازه ضبط صفحه دریافت نشد")
             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             projection = manager.getMediaProjection(resultCode, data)
-            startCapture(intent.getStringExtra(EXTRA_QUALITY) ?: "Auto", withMic)
+            startCapture(startIntent.getStringExtra(EXTRA_QUALITY) ?: "Auto", withMic)
         } catch (e: Exception) {
             stopCapture()
             stopForeground(STOP_FOREGROUND_REMOVE)
