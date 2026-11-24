@@ -1,45 +1,46 @@
 # Tv Ch
 
-گیرنده ترکیبی تلویزیون اینترنتی برای Android.
+Android internet TV and radio player project.
 
-## امکانات این نسخه
-- پخش مستقیم با Media3/ExoPlayer: HLS (M3U8)، MPEG-DASH (MPD)، RTSP، SmoothStreaming و فایل‌های مستقیم HTTP/HTTPS سازگار با رمزگشاهای دستگاه.
-- حالت Web TV با WebView، JavaScript، DOM Storage و پخش رسانه بدون نیاز اجباری به لمس اولیه.
-- ورود فایل محلی M3U/M3U8 و نمایش کانال‌ها به‌صورت دکمه؛ انتخاب هر کانال آن را در پخش‌کننده مستقیم باز می‌کند.
-- حفظ سرویس ضبط HLS نسخه پایه؛ ضبط فقط برای جریان‌های روشن و سازگار و بدون دورزدن DRM.
-- GitHub Actions برای push روی همه شاخه‌ها و اجرای دستی.
+## Added in this update
+- Country catalog search using public IPTV-org country playlists.
+- Topic filters for NEWS, SPORTS and DOCUMENTARY using IPTV-org category playlists.
+- Radio station lookup through the public Radio-Browser directory (up to three results per selected country when available).
+- Channel-name search against IPTV-org channel and stream indexes.
+- Catalog results are added to the in-app channel list and retained locally.
+- TXT export for saved bookmarks and catalog entries.
+- Recording quality selector; for HLS master playlists, the recorder selects the available rendition closest to the chosen height (Auto selects the highest listed rendition).
+- HLS recording saves stream segments only, not the Android screen or surrounding app interface.
 
-## مواردی که هنوز موتور اختصاصی می‌خواهند
-این نسخه ادعای پشتیبانی کامل از همه پروتکل‌ها ندارد. RTMP، SRT، WebRTC، RTP/UDP multicast، Stalker/MAG و APIهای اختصاصی IPTV هنوز به آداپتورهای جداگانه و آزمون با سرویس واقعی نیاز دارند. Xtream Codes نیز در این نسخه رابط ورود اختصاصی ندارد؛ فایل M3U خروجی سرویس را می‌توان پس از دریافت به‌صورت فایل وارد کرد.
-صفحات وب نیز فقط در صورت اجازه سایت، پشتیبانی WebView و سازگاری پخش‌کننده قابل پخش‌اند؛ استخراج یا دورزدن DRM/محدودیت دسترسی انجام نمی‌شود.
+## Important limitations
+- Search results depend on network access and the public directories being reachable. The requested 15 TV + 3 radio entries are targets, not guaranteed counts; only returned entries are shown.
+- IPTV-org channel-name search only returns channels for which a playable URL exists in its stream index.
+- Website-page playback remains dependent on the website's own embedded player. Recording website/WebView playback is not implemented; recording is for compatible clear HLS streams in the direct player.
+- DRM/encrypted HLS is not bypassed. Some HLS formats (for example encrypted or fragmented variants) may not be recordable by this basic segment recorder.
+- TXT export currently writes bookmarks and catalog entries. M3U import remains available through OPEN M3U.
 
-## ساخت
+## Build
 - JDK 17
-- Android SDK 35
-- Gradle 8.9
 - Android Gradle Plugin 8.7.3
 - Kotlin 2.0.21
+- Compile SDK 35
+- Run `gradle assembleDebug` or use the included GitHub Actions workflow.
 
-خروجی GitHub Actions: `Tv Ch-debug`.
+The workflow triggers on pushes to all branches and supports manual dispatch.
 
-
-## Recent interface additions
-
-- English controls: LIVE, WEB TV, CHANNELS, PLAY, OPEN M3U, RECORD, BOOKMARKS, ADD BOOKMARK, and NTV LIVE.
-- Bookmarks are stored locally on the device and can be opened again or cleared.
-- RECORD currently supports clear HLS `.m3u8` streams only. DRM/encrypted streams and web-page player capture are not supported. Recordings are stored in the app's external files `Recordings` folder.
-- NTV LIVE opens `https://news.ntv.co.jp/live` inside the app and attempts to start HTML5/common web players. Some embedded or cross-origin players may still require a tap on their own Play control.
-
-
-## ساختار پوشه‌ها
-- فایل‌های Kotlin: `app/src/main/`
-- منابع Android: `app/res/values/`
-- گردش‌کار GitHub Actions: `.github/workflows/android.yml`
-- عمق مسیرهای اصلی پروژه حداکثر سه پوشه نگه داشته شده است.
-
-## راهنمای MGit و GitHub Actions
-- گردش‌کار با Push به همه شاخه‌ها اجرا می‌شود و از بخش Actions نیز قابل اجرای دستی است.
-- اگر Commit در مخزن دیده می‌شود اما همگام‌سازی محلی/راه‌دور درست نیست، در MGit از منوی Pull گزینه **Force Pull** را اجرا کنید. توجه کنید Force Pull می‌تواند تغییرات محلیِ همگام‌نشده را جایگزین کند؛ پیش از آن تغییرات محلی مهم را ذخیره یا پشتیبان‌گیری کنید.
+## Radio low-consumption mode
+- Use the RADIO tab for audio-only streams. Video tracks are disabled and the player requests at most 48 kbps audio and mono audio when the stream offers compatible alternatives.
+- For the largest real data saving, use a radio provider's low-bitrate audio URL (ideally 32–64 kbps). A fixed-bitrate source cannot be re-encoded by the app; the player-side cap only selects among variants offered by the stream.
+- This build pauses playback when the activity goes to the background. Background radio playback requires a separate MediaSessionService implementation and is not claimed by this change.
 
 
-Repository name: `Tv Ch`
+### Per-minute data usage meter
+A compact meter below the player reports the measured received-data delta for each 60-second interval in KB and MB. It uses Android per-UID TrafficStats, so the value includes all received traffic by Tv Ch (including WebView/catalog traffic), not only the current stream. Some devices may report the counter as unsupported.
+
+## Website screen recording
+In WEB TV mode, press RECORD after starting playback on a website. Android displays its
+system screen-capture consent dialog; approve it to record the visible screen to the app-specific external `Recordings` directory.
+Press STOP RECORDING to finish. This records the visible screen, not a source stream, so
+DRM/secure surfaces may appear black or block capture. Optional microphone audio is subject
+to Android permission and device restrictions; it is not guaranteed to capture internal site audio.
+Direct HLS recording remains available in LIVE mode for supported clear `.m3u8` streams.
