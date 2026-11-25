@@ -44,3 +44,14 @@ Press STOP RECORDING to finish. This records the visible screen, not a source st
 DRM/secure surfaces may appear black or block capture. Optional microphone audio is subject
 to Android permission and device restrictions; it is not guaranteed to capture internal site audio.
 Direct HLS recording remains available in LIVE mode for supported clear `.m3u8` streams.
+
+
+## Recording and catalog-search fixes
+
+- On Android 10 and newer, screen recordings and supported direct HLS recordings are saved through MediaStore in the shared folder `Tv Ch Recorded/Recordings` at the root of shared internal storage. No broad storage permission is required for this MediaStore path.
+- On Android 9 and older, the app uses its app-specific `Recordings` directory because legacy shared-storage access requires a separate runtime permission flow.
+- Screen recording keeps the MediaRecorder preparation sequence, but the VirtualDisplay dimensions now match the encoded video dimensions. The output is only published after a successful recorder stop; incomplete files are deleted.
+- Catalog searches run on a single worker. A newer search cancels and invalidates the previous request, disconnects its active HTTP request, and stale results cannot update the UI.
+- Direct HLS recording supports clear playlists and a single master-playlist variant selection. DRM/encrypted HLS is not bypassed; advanced HLS features such as byte-range segments are not guaranteed.
+
+A successful Android build and on-device recording test are still required to confirm device-specific encoder behavior.
