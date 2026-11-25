@@ -35,10 +35,11 @@ class CountryCatalogPanel(
             this.text = text; textSize = 14f; setTextColor(Color.WHITE); setPadding(4, 4, 4, 2)
         }
         addView(label("COUNTRY CATALOG / جستجوی کشور و موضوع"))
-        country.adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, countries.map { it.first })
+        country.adapter = yellowSpinnerAdapter(countries.map { it.first })
+        country.setPopupBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.rgb(18, 43, 82)))
         addView(country, LayoutParams(-1, -2))
-        topic.adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item,
-            listOf("All channels", "NEWS", "SPORTS", "DOCUMENTARY"))
+        topic.adapter = yellowSpinnerAdapter(listOf("All channels", "NEWS", "SPORTS", "DOCUMENTARY"))
+        topic.setPopupBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.rgb(18, 43, 82)))
         addView(topic, LayoutParams(-1, -2))
         query.hint = "Search TV or radio channel name"
         query.setSingleLine(true)
@@ -61,6 +62,26 @@ class CountryCatalogPanel(
         status.setTextColor(0xFFFFD54F.toInt())
         addView(status)
     }
+
+    /** Yellow text for both the selected Spinner value and its expanded dropdown rows. */
+    private fun yellowSpinnerAdapter(items: List<String>): ArrayAdapter<String> =
+        object : ArrayAdapter<String>(context, android.R.layout.simple_spinner_item, items) {
+            override fun getView(position: Int, convertView: android.view.View?, parent: ViewGroup): android.view.View =
+                styleSpinnerText(super.getView(position, convertView, parent))
+
+            override fun getDropDownView(position: Int, convertView: android.view.View?, parent: ViewGroup): android.view.View =
+                styleSpinnerText(super.getDropDownView(position, convertView, parent), true)
+
+            private fun styleSpinnerText(view: android.view.View, dropdown: Boolean = false): android.view.View {
+                (view as? TextView)?.apply {
+                    setTextColor(0xFFFFD54F.toInt())
+                    textSize = 15f
+                    setPadding(12, if (dropdown) 12 else 8, 12, if (dropdown) 12 else 8)
+                    if (dropdown) setBackgroundColor(Color.rgb(18, 43, 82))
+                }
+                return view
+            }
+        }.also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
 
     private fun searchCountry() {
         val selected = countries[country.selectedItemPosition]
