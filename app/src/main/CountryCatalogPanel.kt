@@ -7,6 +7,10 @@ import android.widget.*
 import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Online catalog based on public IPTV-org playlists and Radio-Browser directory. */
 class CountryCatalogPanel(
@@ -26,6 +30,12 @@ class CountryCatalogPanel(
     private val topic = Spinner(context)
     private val query = EditText(context)
     private val status = TextView(context)
+    private val searchGeneration = AtomicInteger(0)
+    private val searchExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "TvCh-CatalogSearch").apply { isDaemon = true }
+    }
+    @Volatile private var currentSearch: Future<*>? = null
+    @Volatile private var activeConnection: HttpURLConnection? = null
 
     init {
         orientation = VERTICAL
@@ -144,25 +154,59 @@ class CountryCatalogPanel(
     }
 
     private fun runSearch(message: String, task: () -> List<CatalogChannel>) {
+        // هر جستجوی جدید، نتیجه و کار قبلی را منسوخ می‌کند؛ فقط آخرین درخواست اجازه
+        // تغییر UI یا تحویل نتیجه به MainActivity را دارد.
+        val generation = searchGeneration.incrementAndGet()
+        currentSearch?.cancel(true)
+        try { activeConnection?.disconnect() } catch (_: Exception) { }
         status.text = message
-        Thread {
+
+        currentSearch = searchExecutor.submit {
             try {
                 val result = task()
+                if (Thread.currentThread().isInterrupted ||
+                    generation != searchGeneration.get()
+                ) return@submit
+
                 post {
-                    status.text = "${result.size} result(s). Some directory entries may need a playable stream URL."
+                    if (generation != searchGeneration.get()) return@post
+                    status.text =
+                        "${result.size} result(s). Some directory entries may need a playable stream URL."
                     onResults(result, message)
                 }
             } catch (e: Exception) {
-                post { status.text = "Search failed: ${e.message ?: "network error"}" }
+                if (generation == searchGeneration.get() &&
+                    !Thread.currentThread().isInterrupted
+                ) {
+                    post {
+                        if (generation == searchGeneration.get()) {
+                            status.text = "Search failed: ${e.message ?: "network error"}"
+                        }
+                    }
+                }
             }
-        }.start()
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        searchGeneration.incrementAndGet()
+        currentSearch?.cancel(true)
+        try { activeConnection?.disconnect() } catch (_: Exception) { }
+        super.onDetachedFromWindow()
     }
 
     private fun get(address: String): String {
         val connection = URL(address).openConnection() as HttpURLConnection
-        connection.connectTimeout = 15000; connection.readTimeout = 20000
+        connection.connectTimeout = 15000
+        connection.readTimeout = 20000
         connection.setRequestProperty("User-Agent", "TvCh-Android/1.0")
-        return try { connection.inputStream.bufferedReader().use { it.readText() } } finally { connection.disconnect() }
+        activeConnection = connection
+        return try {
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+            if (activeConnection === connection) activeConnection = null
+        }
     }
 
     private fun parseM3u(text: String, countryName: String): List<CatalogChannel> {
