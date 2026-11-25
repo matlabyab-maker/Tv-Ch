@@ -1,182 +1,263 @@
 package com.tvb.player
 
+import android.app.*
 import android.content.Context
-import android.graphics.Color
-import android.view.ViewGroup
-import android.widget.*
-import org.json.JSONArray
-import java.net.HttpURLConnection
-import java.net.URL
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.MediaRecorder
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.Build
+import android.os.IBinder
+import android.util.DisplayMetrics
+import android.view.WindowManager
+import androidx.core.app.NotificationCompat
+import java.io.File
 
-/** Online catalog based on public IPTV-org playlists and Radio-Browser directory. */
-class CountryCatalogPanel(
-    context: Context,
-    private val onResults: (List<CatalogChannel>, String) -> Unit,
-    private val onExport: () -> Unit
-) : LinearLayout(context) {
-    private val countries = listOf(
-        "China" to "cn", "USA" to "us", "Iran" to "ir", "United Kingdom" to "gb",
-        "France" to "fr", "Canada" to "ca", "Germany" to "de", "Japan" to "jp",
-        "India" to "in", "Turkey" to "tr", "Russia" to "ru", "Italy" to "it",
-        "Spain" to "es", "Brazil" to "br", "Australia" to "au", "South Korea" to "kr",
-        "Netherlands" to "nl", "Ukraine" to "ua", "Switzerland" to "ch", "Sweden" to "se",
-        "Norway" to "no", "Mexico" to "mx", "Egypt" to "eg", "South Africa" to "za"
-    )
-    private val country = Spinner(context)
-    private val topic = Spinner(context)
-    private val query = EditText(context)
-    private val status = TextView(context)
+/** Records the visible Android screen (including WebView playback) with the user's explicit MediaProjection consent. */
+class ScreenRecorderService : Service() {
+    private var projection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var recorder: MediaRecorder? = null
 
-    init {
-        orientation = VERTICAL
-        setPadding(8, 6, 8, 6)
-        setBackgroundColor(Color.rgb(18, 43, 82))
-        fun label(text: String) = TextView(context).apply {
-            this.text = text; textSize = 14f; setTextColor(Color.WHITE); setPadding(4, 4, 4, 2)
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val startIntent = intent ?: run {
+            stopSelf(startId)
+            return START_NOT_STICKY
         }
-        addView(label("COUNTRY CATALOG / جستجوی کشور و موضوع"))
-        country.adapter = yellowSpinnerAdapter(countries.map { it.first })
-        country.setPopupBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.rgb(18, 43, 82)))
-        addView(country, LayoutParams(-1, -2))
-        topic.adapter = yellowSpinnerAdapter(listOf("All channels", "NEWS", "SPORTS", "DOCUMENTARY"))
-        topic.setPopupBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.rgb(18, 43, 82)))
-        addView(topic, LayoutParams(-1, -2))
-        query.hint = "Search TV or radio channel name"
-        query.setSingleLine(true)
-        addView(query, LayoutParams(-1, -2))
-        val row = LinearLayout(context).apply { orientation = HORIZONTAL }
-        row.addView(Button(context).apply {
-            text = "SEARCH COUNTRY"; isAllCaps = false
-            setOnClickListener { searchCountry() }
-        }, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        row.addView(Button(context).apply {
-            text = "SEARCH NAME"; isAllCaps = false
-            setOnClickListener { searchName() }
-        }, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        row.addView(Button(context).apply {
-            text = "EXPORT TXT"; isAllCaps = false
-            setOnClickListener { onExport() }
-        }, LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        addView(row)
-        status.text = "Public catalog search is ready"
-        status.setTextColor(0xFFFFD54F.toInt())
-        addView(status)
+
+        if (startIntent.action == ACTION_STOP) {
+            stopCapture()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        createNotificationChannel()
+        val withMic = startIntent.getBooleanExtra(EXTRA_AUDIO, false)
+
+        val notification = NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(android.R.drawable.presence_video_online)
+            .setContentTitle("Tv Ch • ضبط صفحه")
+            .setContentText("در حال ضبط صفحه")
+            .setOngoing(true)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= 29) {
+            var foregroundType =
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+
+            if (Build.VERSION.SDK_INT >= 30 && withMic) {
+                foregroundType = foregroundType or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            }
+
+            startForeground(NOTIFICATION_ID, notification, foregroundType)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        try {
+            val resultCode = startIntent.getIntExtra(
+                EXTRA_RESULT_CODE,
+                Activity.RESULT_CANCELED
+            )
+
+            @Suppress("DEPRECATION")
+            val data = if (Build.VERSION.SDK_INT >= 33) {
+                startIntent.getParcelableExtra(
+                    EXTRA_RESULT_DATA,
+                    Intent::class.java
+                )
+            } else {
+                startIntent.getParcelableExtra(EXTRA_RESULT_DATA)
+            }
+
+            if (resultCode != Activity.RESULT_OK || data == null) {
+                throw IllegalStateException("اجازه ضبط صفحه دریافت نشد")
+            }
+
+            val manager =
+                getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                    as MediaProjectionManager
+
+            projection = manager.getMediaProjection(resultCode, data)
+            startCapture(
+                startIntent.getStringExtra(EXTRA_QUALITY) ?: "Auto",
+                withMic
+            )
+
+        } catch (e: Exception) {
+            stopCapture()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+
+            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                .notify(
+                    NOTIFICATION_ID + 1,
+                    NotificationCompat.Builder(this, CHANNEL)
+                        .setSmallIcon(android.R.drawable.stat_notify_error)
+                        .setContentTitle("Tv Ch • خطای ضبط")
+                        .setContentText(e.message ?: "ضبط شروع نشد")
+                        .build()
+                )
+        }
+
+        return START_NOT_STICKY
     }
 
-    /** Yellow text for both the selected Spinner value and its expanded dropdown rows. */
-    private fun yellowSpinnerAdapter(items: List<String>): ArrayAdapter<String> =
-        object : ArrayAdapter<String>(context, android.R.layout.simple_spinner_item, items) {
-            override fun getView(position: Int, convertView: android.view.View?, parent: ViewGroup): android.view.View =
-                styleSpinnerText(super.getView(position, convertView, parent))
+    private fun startCapture(quality: String, withMic: Boolean) {
+        val metrics = DisplayMetrics()
 
-            override fun getDropDownView(position: Int, convertView: android.view.View?, parent: ViewGroup): android.view.View =
-                styleSpinnerText(super.getDropDownView(position, convertView, parent), true)
+        @Suppress("DEPRECATION")
+        (getSystemService(WINDOW_SERVICE) as WindowManager)
+            .defaultDisplay.getRealMetrics(metrics)
 
-            private fun styleSpinnerText(view: android.view.View, dropdown: Boolean = false): android.view.View {
-                (view as? TextView)?.apply {
-                    setTextColor(0xFFFFD54F.toInt())
-                    textSize = 15f
-                    setPadding(12, if (dropdown) 12 else 8, 12, if (dropdown) 12 else 8)
-                    if (dropdown) setBackgroundColor(Color.rgb(18, 43, 82))
-                }
-                return view
+        val width = (metrics.widthPixels / 2) * 2
+        val height = (metrics.heightPixels / 2) * 2
+        val dpi = metrics.densityDpi
+
+        val folder = getExternalFilesDir("Recordings")
+            ?: File(filesDir, "Recordings")
+
+        if (!folder.exists()) folder.mkdirs()
+
+        val output = File(
+            folder,
+            "TvCh_Web_${System.currentTimeMillis()}.mp4"
+        )
+
+        val recorderInstance = createRecorder()
+        recorder = recorderInstance
+
+        recorderInstance.apply {
+            if (withMic) {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
             }
-        }.also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
 
-    private fun searchCountry() {
-        val selected = countries[country.selectedItemPosition]
-        val topicName = when (topic.selectedItemPosition) {
-            1 -> "news"; 2 -> "sports"; 3 -> "documentary"; else -> ""
+            setVideoSource(MediaRecorder.VideoSource.SURFACE)
+            setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            setOutputFile(output.absolutePath)
+
+            val targetHeight =
+                quality.removeSuffix("p").toIntOrNull() ?: 720
+
+            val scale = minOf(
+                1f,
+                targetHeight.toFloat() / height.toFloat()
+            )
+
+            val outW = ((width * scale).toInt() / 2) * 2
+            val outH = ((height * scale).toInt() / 2) * 2
+
+            setVideoSize(
+                outW.coerceAtLeast(2),
+                outH.coerceAtLeast(2)
+            )
+
+            setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+            setVideoEncodingBitRate(4_000_000)
+            setVideoFrameRate(30)
+
+            if (withMic) {
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioEncodingBitRate(128_000)
+                setAudioSamplingRate(44_100)
+            }
+
+            prepare()
         }
-        runSearch("Searching ${selected.first} ${topicName.ifBlank { "TV" }}…") {
-            val countryItems = parseM3u(get("https://iptv-org.github.io/iptv/countries/${selected.second}.m3u"), selected.first)
-            val filtered = if (topicName.isBlank()) countryItems else {
-                val topicItems = parseM3u(get("https://iptv-org.github.io/iptv/categories/$topicName.m3u"), selected.first)
-                val urls = topicItems.map { it.url }.toHashSet()
-                countryItems.filter { it.url in urls }
-            }
-            val radio = runCatching { fetchRadio(selected.first) }.getOrDefault(emptyList())
-            if (topicName.isBlank()) (filtered + radio).distinctBy { it.url }.take(250)
-            else (filtered.take(15) + radio.take(3)).distinctBy { it.url }
+
+        val surface = recorderInstance.surface
+
+        virtualDisplay = projection?.createVirtualDisplay(
+            "TvChScreenCapture",
+            width,
+            height,
+            dpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            surface,
+            null,
+            null
+        ) ?: throw IllegalStateException("اتصال ضبط صفحه برقرار نشد")
+
+        recorderInstance.start()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun createRecorder(): MediaRecorder =
+        if (Build.VERSION.SDK_INT >= 31) {
+            MediaRecorder(this)
+        } else {
+            MediaRecorder()
+        }
+
+    private fun stopCapture() {
+        try {
+            recorder?.stop()
+        } catch (_: Exception) {
+        }
+
+        try {
+            virtualDisplay?.release()
+        } catch (_: Exception) {
+        }
+
+        try {
+            recorder?.reset()
+            recorder?.release()
+        } catch (_: Exception) {
+        }
+
+        try {
+            projection?.stop()
+        } catch (_: Exception) {
+        }
+
+        virtualDisplay = null
+        recorder = null
+        projection = null
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            val manager =
+                getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL,
+                    "ضبط صفحه Tv Ch",
+                    NotificationManager.IMPORTANCE_LOW
+                )
+            )
         }
     }
 
-    private fun searchName() {
-        val term = query.text.toString().trim()
-        if (term.isBlank()) { Toast.makeText(context, "Enter a channel name", Toast.LENGTH_SHORT).show(); return }
-        runSearch("Searching public channel catalogs for $term…") {
-            val channels = JSONArray(get("https://iptv-org.github.io/api/channels.json"))
-            val matched = HashMap<String, CatalogChannel>()
-            for (i in 0 until channels.length()) {
-                val item = channels.optJSONObject(i) ?: continue
-                val name = item.optString("name")
-                if (name.contains(term, true)) {
-                    val code = item.optString("country")
-                    val countryName = countries.firstOrNull { it.second.equals(code, true) }?.first ?: code
-                    matched[item.optString("id")] = CatalogChannel(name, "", countryName, "TV")
-                }
-            }
-            val streams = JSONArray(get("https://iptv-org.github.io/api/streams.json"))
-            val found = ArrayList<CatalogChannel>()
-            for (i in 0 until streams.length()) {
-                val item = streams.optJSONObject(i) ?: continue
-                val channelId = item.optString("channel")
-                val base = matched[channelId] ?: continue
-                val address = item.optString("url")
-                if (address.startsWith("http") || address.startsWith("rtsp"))
-                    found.add(base.copy(url = address))
-                if (found.size >= 50) break
-            }
-            found
+    override fun onDestroy() {
+        stopCapture()
+        super.onDestroy()
+    }
+
+    companion object {
+        const val EXTRA_RESULT_CODE = "projection_result_code"
+        const val EXTRA_RESULT_DATA = "projection_result_data"
+        const val EXTRA_QUALITY = "recording_quality"
+        const val EXTRA_AUDIO = "record_audio"
+
+        private const val CHANNEL = "tvch_screen_recording"
+        private const val NOTIFICATION_ID = 71
+        private const val ACTION_STOP = "tvch.stop.screen.recording"
+
+        fun stop(context: Context) {
+            context.startService(
+                Intent(context, ScreenRecorderService::class.java)
+                    .setAction(ACTION_STOP)
+            )
         }
-    }
-
-    private fun fetchRadio(countryName: String): List<CatalogChannel> {
-        val encoded = java.net.URLEncoder.encode(countryName, "UTF-8")
-        val array = JSONArray(get("https://de1.api.radio-browser.info/json/stations/bycountryexact/$encoded"))
-        val result = ArrayList<CatalogChannel>()
-        for (i in 0 until minOf(array.length(), 3)) {
-            val item = array.optJSONObject(i) ?: continue
-            val stream = item.optString("url_resolved").ifBlank { item.optString("url") }
-            if (stream.startsWith("http")) result.add(CatalogChannel(item.optString("name", "Radio"), stream, countryName, "RADIO"))
-        }
-        return result
-    }
-
-    private fun runSearch(message: String, task: () -> List<CatalogChannel>) {
-        status.text = message
-        Thread {
-            try {
-                val result = task()
-                post {
-                    status.text = "${result.size} result(s). Some directory entries may need a playable stream URL."
-                    onResults(result, message)
-                }
-            } catch (e: Exception) {
-                post { status.text = "Search failed: ${e.message ?: "network error"}" }
-            }
-        }.start()
-    }
-
-    private fun get(address: String): String {
-        val connection = URL(address).openConnection() as HttpURLConnection
-        connection.connectTimeout = 15000; connection.readTimeout = 20000
-        connection.setRequestProperty("User-Agent", "TvCh-Android/1.0")
-        return try { connection.inputStream.bufferedReader().use { it.readText() } } finally { connection.disconnect() }
-    }
-
-    private fun parseM3u(text: String, countryName: String): List<CatalogChannel> {
-        val result = ArrayList<CatalogChannel>()
-        var name = "Unnamed channel"
-        for (lineRaw in text.lineSequence()) {
-            val line = lineRaw.trim()
-            if (line.startsWith("#EXTINF", true)) name = line.substringAfterLast(',').trim().ifBlank { "Unnamed channel" }
-            else if (line.startsWith("http://") || line.startsWith("https://") || line.startsWith("rtsp://")) {
-                result.add(CatalogChannel(name, line, countryName, "TV")); name = "Unnamed channel"
-            }
-        }
-        return result
     }
 }
-
-data class CatalogChannel(val name: String, val url: String, val country: String, val type: String)
