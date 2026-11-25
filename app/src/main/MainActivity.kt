@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var usageMeter: TextView
     private val usageHandler = Handler(Looper.getMainLooper())
     private var lastRxBytes = -1L
+    private var totalRxBytes = 0L
     private var usageMonitorStarted = false
     private val usageTick = object : Runnable {
         override fun run() {
@@ -351,32 +352,44 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Android UID traffic counters report bytes received by this app (player + WebView + catalog traffic).
-    // The displayed figure is the measured delta for each 60-second interval, not an estimated bitrate.
+    // Android UID counters measure received bytes for this app (player + WebView + catalog).
+    // The optimized figure is an explicitly-labelled 50% reduction scenario, not a second measurement.
     private fun startNetworkUsageMonitor() {
         usageMonitorStarted = true
         lastRxBytes = readUidRxBytes()
+        totalRxBytes = 0L
         usageHandler.removeCallbacks(usageTick)
-        usageMeter.text = "مصرف اینترنت در هر دقیقه: در حال اندازه‌گیری…"
+        usageMeter.text = "مصرف واقعی و بهینه: در حال اندازه‌گیری…"
         usageHandler.postDelayed(usageTick, 60_000L)
     }
 
     private fun readUidRxBytes(): Long = TrafficStats.getUidRxBytes(Process.myUid())
 
+    private fun formatUsage(bytes: Long): String {
+        val kb = bytes / 1024.0
+        val mb = bytes / (1024.0 * 1024.0)
+        return if (mb >= 1.0) String.format(java.util.Locale.US, "%.2f MB (%.0f KB)", mb, kb)
+        else String.format(java.util.Locale.US, "%.1f KB (%.3f MB)", kb, mb)
+    }
+
     private fun updateNetworkUsage() {
         val current = readUidRxBytes()
         if (current == TrafficStats.UNSUPPORTED.toLong() || lastRxBytes < 0L) {
-            usageMeter.text = "مصرف اینترنت در هر دقیقه: در این دستگاه قابل اندازه‌گیری نیست"
+            usageMeter.text = "مصرف اینترنت: اندازه‌گیری در این دستگاه پشتیبانی نمی‌شود"
             lastRxBytes = current
             return
         }
         val delta = (current - lastRxBytes).coerceAtLeast(0L)
         lastRxBytes = current
-        val kb = delta / 1024.0
-        val mb = delta / (1024.0 * 1024.0)
-        val amount = if (mb >= 1.0) String.format(java.util.Locale.US, "%.2f MB  (%.0f KB)", mb, kb)
-                     else String.format(java.util.Locale.US, "%.1f KB  (%.3f MB)", kb, mb)
-        usageMeter.text = "مصرف واقعی ۱ دقیقه اخیر: $amount"
+        totalRxBytes += delta
+        val optimizedMinute = delta / 2L
+        val optimizedTotal = totalRxBytes / 2L
+        usageMeter.text = buildString {
+            append("واقعی در دقیقه: ${formatUsage(delta)}\n")
+            append("بهینه تخمینی در دقیقه (۵۰٪ کمتر): ${formatUsage(optimizedMinute)}\n")
+            append("مجموع واقعی: ${formatUsage(totalRxBytes)}\n")
+            append("مجموع بهینه تخمینی: ${formatUsage(optimizedTotal)}")
+        }
     }
 
     private fun stopNetworkUsageMonitor() {
