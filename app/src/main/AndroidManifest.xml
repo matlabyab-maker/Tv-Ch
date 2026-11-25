@@ -9,6 +9,8 @@
     <application
         android:theme="@style/AppTheme"
         android:label="Tv Ch"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher"
         android:usesCleartextTraffic="true"
         android:hardwareAccelerated="true"
         android:supportsRtl="true">
