@@ -11,16 +11,28 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
-import java.io.File
 
 /** Records the visible Android screen (including WebView playback) with the user's explicit MediaProjection consent. */
 class ScreenRecorderService : Service() {
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var recorder: MediaRecorder? = null
+    private var outputTarget: PublicRecordingTarget? = null
+    private var recordingStarted = false
+    private var projectionCallbackRegistered = false
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            projectionCallbackRegistered = false
+            stopCapture(stopProjection = false)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -86,6 +98,8 @@ class ScreenRecorderService : Service() {
                     as MediaProjectionManager
 
             projection = manager.getMediaProjection(resultCode, data)
+            projection?.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
+            projectionCallbackRegistered = true
             startCapture(
                 startIntent.getStringExtra(EXTRA_QUALITY) ?: "Auto",
                 withMic
@@ -121,15 +135,17 @@ class ScreenRecorderService : Service() {
         val height = (metrics.heightPixels / 2) * 2
         val dpi = metrics.densityDpi
 
-        val folder = getExternalFilesDir("Recordings")
-            ?: File(filesDir, "Recordings")
-
-        if (!folder.exists()) folder.mkdirs()
-
-        val output = File(
-            folder,
-            "TvCh_Web_${System.currentTimeMillis()}.mp4"
+        val target = PublicRecordingTarget.create(
+            this,
+            "TvCh_Web_${System.currentTimeMillis()}.mp4",
+            "video/mp4"
         )
+        outputTarget = target
+
+        val targetHeight = quality.removeSuffix("p").toIntOrNull() ?: 720
+        val scale = minOf(1f, targetHeight.toFloat() / height.toFloat())
+        val outW = ((width * scale).toInt() / 2) * 2
+        val outH = ((height * scale).toInt() / 2) * 2
 
         val recorderInstance = createRecorder()
         recorder = recorderInstance
@@ -141,18 +157,11 @@ class ScreenRecorderService : Service() {
 
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            setOutputFile(output.absolutePath)
-
-            val targetHeight =
-                quality.removeSuffix("p").toIntOrNull() ?: 720
-
-            val scale = minOf(
-                1f,
-                targetHeight.toFloat() / height.toFloat()
-            )
-
-            val outW = ((width * scale).toInt() / 2) * 2
-            val outH = ((height * scale).toInt() / 2) * 2
+            if (target.descriptor != null) {
+                setOutputFile(target.descriptor.fileDescriptor)
+            } else {
+                setOutputFile(target.file!!.absolutePath)
+            }
 
             setVideoSize(
                 outW.coerceAtLeast(2),
@@ -176,8 +185,8 @@ class ScreenRecorderService : Service() {
 
         virtualDisplay = projection?.createVirtualDisplay(
             "TvChScreenCapture",
-            width,
-            height,
+            outW.coerceAtLeast(2),
+            outH.coerceAtLeast(2),
             dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             surface,
@@ -186,6 +195,7 @@ class ScreenRecorderService : Service() {
         ) ?: throw IllegalStateException("اتصال ضبط صفحه برقرار نشد")
 
         recorderInstance.start()
+        recordingStarted = true
     }
 
     @Suppress("DEPRECATION")
@@ -196,10 +206,13 @@ class ScreenRecorderService : Service() {
             MediaRecorder()
         }
 
-    private fun stopCapture() {
+    private fun stopCapture(stopProjection: Boolean = true) {
+        var finalized = false
         try {
             recorder?.stop()
+            finalized = recordingStarted
         } catch (_: Exception) {
+            finalized = false
         }
 
         try {
@@ -213,14 +226,27 @@ class ScreenRecorderService : Service() {
         } catch (_: Exception) {
         }
 
-        try {
-            projection?.stop()
-        } catch (_: Exception) {
+        if (projectionCallbackRegistered) {
+            try { projection?.unregisterCallback(projectionCallback) } catch (_: Exception) { }
+            projectionCallbackRegistered = false
+        }
+        if (stopProjection) {
+            try { projection?.stop() } catch (_: Exception) { }
         }
 
         virtualDisplay = null
         recorder = null
         projection = null
+        recordingStarted = false
+
+        val target = outputTarget
+        outputTarget = null
+        try { target?.descriptor?.close() } catch (_: Exception) { }
+        if (finalized) {
+            try { target?.publish(this) } catch (_: Exception) { target?.delete(this) }
+        } else {
+            target?.delete(this)
+        }
     }
 
     private fun createNotificationChannel() {
